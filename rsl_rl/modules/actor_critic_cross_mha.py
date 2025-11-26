@@ -16,7 +16,7 @@ from rsl_rl.networks import MLP, CNN, EmpiricalNormalization
 from .actor_critic import ActorCritic
 
 
-class ActorCriticCrossAttention(ActorCritic):
+class ActorCriticCrossMHA(ActorCritic):
     def __init__(
         self,
         obs: TensorDict,
