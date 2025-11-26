@@ -10,12 +10,9 @@ import torch.nn as nn
 
 
 class CrossAttention(nn.Module):
-    """
-    A Cross-Attention Block (Transformer style).
+    """Cross Multihead Attention (Cross MHA).
 
-    Applies MHA where Q attends to KV. Includes Layer Normalization (Pre-LN style)
-    and a residual connection for training stability.
-    Assumes inputs Q and KV are already projected to the embedding dimension (D).
+    This network is used to encoder map future. It currently supports Cross MHA only.
     """
 
     def __init__(
@@ -23,23 +20,26 @@ class CrossAttention(nn.Module):
             embed_dim: int,
             num_heads: int,
             dropout: float = 0.0,
+            bias: bool = True,
+            kdim: int = None,
+            vdim: int = None,
+            batch_first: bool = True,
     ) -> None:
-        """Initialize the CrossAttention Block."""
         super().__init__()
         self.embed_dim = embed_dim
-
         # 1. Layer Normalization (Pre-LN)
         self.norm_q = nn.LayerNorm(embed_dim)
         self.norm_kv = nn.LayerNorm(embed_dim)
-
         # 2. Multihead Attention
         self.mha = nn.MultiheadAttention(
             embed_dim=embed_dim,
             num_heads=num_heads,
             dropout=dropout,
-            batch_first=True  # Inputs as (Batch, SeqLen, EmbedDim)
+            bias=bias,
+            kdim=kdim,
+            vdim=vdim,
+            batch_first=batch_first  # Inputs as (Batch, SeqLen, EmbedDim)
         )
-
         self._output_dim = embed_dim
 
     @property
