@@ -102,10 +102,11 @@ class ActorCriticCrossMHA(ActorCritic):
                 )
                 print(f"Actor CNN for {obs_group}: {self.actor_cnns[obs_group]}")
                 # Get the output dimension of the CNN
-                if self.actor_cnns[obs_group].output_channels is None:
-                    encoding_dim += int(self.actor_cnns[obs_group].output_channels + 3)  # type: ignore
-                else:
-                    raise ValueError("The output of the actor CNN must be flattened before passing it to the MLP.")
+                # if self.actor_cnns[obs_group].output_channels is None:
+                #     encoding_dim += int(self.actor_cnns[obs_group].output_channels)  # type: ignore
+                # else:
+                #     raise ValueError("The output of the actor CNN must be flattened before passing it to the MLP.")
+                encoding_dim += int(self.actor_cnns[obs_group].output_channels) + 3
         else:
             self.actor_cnns = None
             encoding_dim = 0
@@ -168,10 +169,11 @@ class ActorCriticCrossMHA(ActorCritic):
                 )
                 print(f"Critic CNN for {obs_group}: {self.critic_cnns[obs_group]}")
                 # Get the output dimension of the CNN
-                if self.critic_cnns[obs_group].output_channels is None:
-                    encoding_dim += int(self.critic_cnns[obs_group].output_channels + 3)  # type: ignore
-                else:
-                    raise ValueError("The output of the critic CNN must be flattened before passing it to the MLP.")
+                # if self.critic_cnns[obs_group].output_channels is None:
+                #     encoding_dim += int(self.critic_cnns[obs_group].output_channels)  # type: ignore
+                # else:
+                #     raise ValueError("The output of the critic CNN must be flattened before passing it to the MLP.")
+                encoding_dim += int(self.actor_cnns[obs_group].output_channels) + 3
         else:
             self.critic_cnns = None
             encoding_dim = 0
@@ -239,7 +241,7 @@ class ActorCriticCrossMHA(ActorCritic):
             # Encode the 2D actor observations
             cnn_enc_list = [self.actor_cnns[obs_group](cnn_obs[obs_group][:,2:3,:,:]) for obs_group in self.actor_obs_groups_2d]
             # (B, 61, LxW)
-            cnn_enc = torch.cat(cnn_enc_list, dim=-1)
+            cnn_enc = torch.cat(cnn_enc_list, dim=-1).flatten(start_dim=2)
             # (B, 3, LxW)
             cnn_obs_orig = cnn_obs["policy_map"].flatten(start_dim=2)
             # (B, 64, LxW)
@@ -265,9 +267,8 @@ class ActorCriticCrossMHA(ActorCritic):
 
         if self.actor_cnns is not None:
             # Encode the 2D actor observations
-            cnn_enc_list = [self.actor_cnns[obs_group](cnn_obs[obs_group][:, 2:3, :, :]) for obs_group in
-                            self.actor_obs_groups_2d]
-            cnn_enc = torch.cat(cnn_enc_list, dim=-1)
+            cnn_enc_list = [self.actor_cnns[obs_group](cnn_obs[obs_group][:, 2:3, :, :]) for obs_group in self.actor_obs_groups_2d]
+            cnn_enc = torch.cat(cnn_enc_list, dim=-1).flatten(start_dim=2)
             cnn_obs_orig = cnn_obs["policy_map"].flatten(start_dim=2)
             map_future = torch.cat((cnn_enc, cnn_obs_orig), dim=1)
             linear = self.actor_linear(mlp_obs.unsqueeze(1))
@@ -288,7 +289,7 @@ class ActorCriticCrossMHA(ActorCritic):
             cnn_enc_list = [self.critic_cnns[obs_group](cnn_obs[obs_group][:, 2:3, :, :]) for obs_group in
                             self.critic_obs_groups_2d]
             # (B, 61, LxW)
-            cnn_enc = torch.cat(cnn_enc_list, dim=-1)
+            cnn_enc = torch.cat(cnn_enc_list, dim=-1).flatten(start_dim=2)
             # (B, 3, LxW)
             cnn_obs_orig = cnn_obs["critic_map"].flatten(start_dim=2)
             # (B, 64, LxW)
