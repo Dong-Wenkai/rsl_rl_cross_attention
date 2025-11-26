@@ -5,12 +5,14 @@
 
 """Definitions for components of modules."""
 
+from .cross_attention import CrossAttention
 from .cnn import CNN
 from .memory import HiddenState, Memory
 from .mlp import MLP
 from .normalization import EmpiricalDiscountedVariationNormalization, EmpiricalNormalization
 
 __all__ = [
+    "CrossAttention",
     "CNN",
     "MLP",
     "EmpiricalDiscountedVariationNormalization",

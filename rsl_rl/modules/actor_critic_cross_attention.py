@@ -1,5 +1,3 @@
-# Filename: modules/actor_critic_attention.py
-
 # Copyright (c) 2021-2025, ETH Zurich and NVIDIA CORPORATION
 # All rights reserved.
 #
@@ -11,24 +9,17 @@ import torch
 import torch.nn as nn
 from tensordict import TensorDict
 from torch.distributions import Normal
-from typing import Any, NoReturn
+from typing import Any
+
+from rsl_rl.networks import MLP, CNN, CrossAttention, EmpiricalNormalization
+
+from .actor_critic import ActorCritic
 
 
-# 假设这些模块可以被正确导入。请根据你的项目结构调整导入路径。
-# 例如:
-# try:
-#     # 导入 rsl_rl 提供的 MLP
-#     from rsl_rl.networks import MLP
-#     # 导入我们刚定义的模块
-#     from rsl_rl.networks.cross_attention import CrossAttention, SpatialFeatureEncoder
-# except ImportError:
-#      print("Warning: Cannot import MLP, CrossAttention or SpatialFeatureEncoder.")
-
-
-class ActorCriticCrossAttention(nn.Module):
+class ActorCriticAttention(ActorCritic):
     """
-    Actor-Critic network implementing the architecture described in
-    "Attention-based map encoding for learning generalized legged locomotion" (Fig 8B).
+    Actor-Critic network assembling the pipeline using rsl_rl modules (CNN, MLP, EmpiricalNormalization)
+    and the CrossAttention block, matching He et al. (Fig 8B).
     """
     is_recurrent: bool = False
 
@@ -37,204 +28,285 @@ class ActorCriticCrossAttention(nn.Module):
             obs: TensorDict,
             obs_groups: dict[str, list[str]],
             num_actions: int,
-            # Attention Encoder Configuration (Matching the paper defaults)
+            # RSL RL 标准化参数
+            actor_obs_normalization: bool = True,
+            critic_obs_normalization: bool = True,
+            # Attention Configuration (Matching the paper defaults)
             embed_dim: int = 64,
             num_heads: int = 16,
             # MLP Configuration
-            actor_hidden_dims: list[int] = [256, 128],  # 根据需要调整
+            actor_hidden_dims: list[int] = [256, 128],
             critic_hidden_dims: list[int] = [256, 128],
             activation: str = "elu",
             init_noise_std: float = 1.0,
+            # 保持与 ActorCritic 基类兼容所需的参数
+            noise_std_type: str = "scalar",
+            state_dependent_std: bool = False,
             **kwargs: dict[str, Any],
     ) -> None:
-        if kwargs:
-            print(
-                "ActorCriticAttention.__init__ got unexpected arguments, which will be ignored: " + str(kwargs)
-            )
-        super().__init__()
+        # 调用父类的 __init__ (即 nn.Module.__init__), 模仿 ActorCriticCNN 的方式
+        super(ActorCritic, self).__init__()
 
         self.obs_groups = obs_groups
         self.embed_dim = embed_dim
-        self.attn_weights = None  # Store attention weights for visualization
+        # 存储注意力权重以供可视化（可选）
+        self.attn_weights_actor = None
+        self.attn_weights_critic = None
 
         # --------------------------------------------------------------------
-        # 1. Dimension Analysis
+        # 1. Dimension Analysis & Normalization Setup
         # --------------------------------------------------------------------
 
-        # A. Proprioception (d_obs)
-        proprio_dim = 0
-        for obs_name in obs_groups.get("proprioception", []):
-            proprio_dim += obs[obs_name].shape[-1]
-        if proprio_dim == 0:
-            raise ValueError("Requires 'proprioception' observation group.")
-        self.proprio_dim = proprio_dim
+        # A. Actor Inputs (Proprioception + Map Scans)
+        actor_proprio_dim, actor_map_dim = self._analyze_inputs(obs, obs_groups.get("policy", []))
 
-        # B. Map Scans (L, W, 3)
-        map_scan_names = obs_groups.get("map_scans", [])
-        if not map_scan_names or len(map_scan_names) > 1:
-            raise ValueError("Requires exactly one 'map_scans' input tensor.")
+        # B. Critic Inputs (Proprioception + Map Scans)
+        critic_proprio_dim, critic_map_dim = self._analyze_inputs(obs, obs_groups.get("critic", []))
 
-        # 存储观测名称以便在 forward 中使用
-        self.map_scan_name = map_scan_names[0]
-        map_shape = obs[self.map_scan_name].shape
+        # C. Normalization for Proprioception (1D inputs)
+        self.actor_obs_normalization = actor_obs_normalization
+        if actor_obs_normalization:
+            self.actor_obs_normalizer = EmpiricalNormalization(actor_proprio_dim)
+        else:
+            self.actor_obs_normalizer = torch.nn.Identity()
 
-        # Expected shape (B, 3, L, W) for CNN processing (Channels-First)
-        if len(map_shape) != 4 or map_shape[1] != 3:
-            raise ValueError(f"Expected map_scans shape (B, 3, L, W), but got {map_shape}")
+        self.critic_obs_normalization = critic_obs_normalization
+        if critic_obs_normalization:
+            self.critic_obs_normalizer = EmpiricalNormalization(critic_proprio_dim)
+        else:
+            self.critic_obs_normalizer = torch.nn.Identity()
 
         # --------------------------------------------------------------------
-        # 2. Encoder Initialization (Fig 8B Encoder)
+        # 2. Encoder Components Definition (Assembling Fig 8B)
         # --------------------------------------------------------------------
+        # PPO通常为Actor和Critic使用独立的网络实例。
 
-        # A. Spatial Encoder (Keys/Values)
-        self.spatial_encoder = SpatialFeatureEncoder(
-            embed_dim=embed_dim,
-            activation=activation,
-        )
+        # A. Actor Encoder
+        self.actor_encoder = self._build_encoder(actor_proprio_dim, actor_map_dim, embed_dim, num_heads, activation)
 
-        # B. Proprioception Projection (Query)
-        self.q_projection = nn.Linear(proprio_dim, embed_dim)
-
-        # C. Cross-Attention (MHA)
-        self.attention = CrossAttention(
-            embed_dim=embed_dim,
-            num_heads=num_heads,
-        )
-        # The Query sequence length (N) is fixed at 1 in this architecture.
-        self.query_seq_len = 1
-
-        print(f"Attention Encoder initialized. D={embed_dim}, Heads={num_heads}, d_obs={proprio_dim}")
+        # B. Critic Encoder (结构相同，但权重独立)
+        self.critic_encoder = self._build_encoder(critic_proprio_dim, critic_map_dim, embed_dim, num_heads, activation)
 
         # --------------------------------------------------------------------
-        # 3. Actor and Critic MLPs (Fig 8B Policy)
+        # 3. Actor and Critic MLPs (Policy Heads)
         # --------------------------------------------------------------------
 
-        # Input dimension is the concatenation of Attention Output (D) and original Proprioception (d_obs)
-        mlp_input_dim = embed_dim + proprio_dim
-
-        self.actor = MLP(mlp_input_dim, num_actions, actor_hidden_dims, activation)
+        # Actor MLP
+        actor_mlp_input_dim = embed_dim + actor_proprio_dim
+        self.state_dependent_std = state_dependent_std
+        if self.state_dependent_std:
+            self.actor = MLP(actor_mlp_input_dim, [2, num_actions], actor_hidden_dims, activation)
+        else:
+            self.actor = MLP(actor_mlp_input_dim, num_actions, actor_hidden_dims, activation)
         print(f"Actor MLP: {self.actor}")
 
-        # Critic shares the same input structure
-        self.critic = MLP(mlp_input_dim, 1, critic_hidden_dims, activation)
+        # Critic MLP
+        critic_mlp_input_dim = embed_dim + critic_proprio_dim
+        self.critic = MLP(critic_mlp_input_dim, 1, critic_hidden_dims, activation)
         print(f"Critic MLP: {self.critic}")
 
         # --------------------------------------------------------------------
-        # 4. RSL RL Standard Components
+        # 4. RSL RL Standard Components (Noise)
         # --------------------------------------------------------------------
+        # 噪声处理逻辑，完全复制自 ActorCritic/ActorCriticCNN
+        self.noise_std_type = noise_std_type
+        if self.state_dependent_std:
+            torch.nn.init.zeros_(self.actor[-2].weight[num_actions:])
+            if self.noise_std_type == "scalar":
+                torch.nn.init.constant_(self.actor[-2].bias[num_actions:], init_noise_std)
+            elif self.noise_std_type == "log":
+                torch.nn.init.constant_(
+                    self.actor[-2].bias[num_actions:], torch.log(torch.tensor(init_noise_std + 1e-7))
+                )
+            else:
+                raise ValueError(f"Unknown standard deviation type: {self.noise_std_type}. Should be 'scalar' or 'log'")
+        else:
+            if self.noise_std_type == "scalar":
+                self.std = nn.Parameter(init_noise_std * torch.ones(num_actions))
+            elif self.noise_std_type == "log":
+                self.log_std = nn.Parameter(torch.log(init_noise_std * torch.ones(num_actions)))
+            else:
+                raise ValueError(f"Unknown standard deviation type: {self.noise_std_type}. Should be 'scalar' or 'log'")
 
-        # Observation normalization (Not explicitly used in the paper's architecture)
-        self.actor_obs_normalizer = nn.Identity()
-        self.critic_obs_normalizer = nn.Identity()
-
-        # Action noise (Using fixed standard deviation)
-        self.state_dependent_std = False
-        self.std = nn.Parameter(init_noise_std * torch.ones(num_actions))
         self.distribution = None
         Normal.set_default_validate_args(False)
 
         self.init_weights()
 
+    def _analyze_inputs(self, obs: TensorDict, group_names: list[str]):
+        """Helper to analyze input dimensions."""
+        proprio_dim = 0
+        map_dim = None
+
+        for name in group_names:
+            shape = obs[name].shape
+            if len(shape) == 2:  # (B, C) - Proprioception
+                proprio_dim += shape[-1]
+            elif len(shape) == 4 and shape[1] == 3:  # (B, 3, L, W) - Map Scans
+                if map_dim is not None:
+                    raise ValueError("Only one map scan input group supported per Actor/Critic.")
+                map_dim = shape[2:4]  # (L, W)
+            else:
+                raise ValueError(f"Invalid observation shape for {name}: {shape}")
+
+        if proprio_dim == 0 or map_dim is None:
+            raise ValueError("Requires both proprioception (1D) and map scans (B, 3, L, W) inputs in the group.")
+
+        return proprio_dim, map_dim
+
+    def _build_encoder(self, proprio_dim, map_dim, embed_dim, num_heads, activation):
+        """Helper to build the encoder components (CNN, Linear, Attention)."""
+        encoder = nn.ModuleDict()
+
+        if embed_dim <= 3: raise ValueError("embed_dim must be > 3.")
+
+        # 1. CNN (K/V Path)
+        cnn_cfg = {
+            "output_channels": [16, embed_dim - 3],
+            "kernel_size": 5,
+            "stride": 1,
+            "padding": "zeros",  # 自动计算填充以保持维度
+            "activation": activation,
+            "flatten": False
+        }
+        # input_channels=1 (Height only)
+        encoder['cnn'] = CNN(input_dim=map_dim, input_channels=1, **cnn_cfg)
+
+        # 2. Linear Projection (Q Path)
+        encoder['q_proj'] = nn.Linear(proprio_dim, embed_dim)
+
+        # 3. Cross-Attention Module
+        encoder['attention'] = CrossAttention(embed_dim=embed_dim, num_heads=num_heads)
+
+        return encoder
+
     def init_weights(self):
-        # Initialize network components
-        self.spatial_encoder.init_weights()
-        self.attention.init_weights()
+        # 初始化所有组件
+        for encoder in [self.actor_encoder, self.critic_encoder]:
+            encoder['cnn'].init_weights()
+            encoder['attention'].init_weights()
+            # 初始化 Q 投影 (Orthogonal)
+            nn.init.orthogonal_(encoder['q_proj'].weight, gain=1.0)
+            if encoder['q_proj'].bias is not None:
+                nn.init.zeros_(encoder['q_proj'].bias)
 
-        # Initialize Q projection (Orthogonal initialization)
-        nn.init.orthogonal_(self.q_projection.weight, gain=1.0)
-        if self.q_projection.bias is not None:
-            nn.init.zeros_(self.q_projection.bias)
+        # MLP 权重由其自身和噪声初始化逻辑处理
 
-        # Initialize MLPs (Assuming MLP class has init_weights method)
-        self.actor.init_weights(scales=1.0)
-        self.critic.init_weights(scales=1.0)
-
-    def _get_features(self, obs: TensorDict) -> torch.Tensor:
+    def _get_features(self, obs: TensorDict, encoder: nn.ModuleDict, normalizer: nn.Module,
+                      group_key: str) -> torch.Tensor:
         """Implements the forward pass matching Fig 8B."""
         B = obs.batch_size[0]
 
-        # 1. Prepare Inputs
-        # Map Scans (B, 3, L, W)
-        map_scans = obs[self.map_scan_name]
+        # 1. 准备输入并标准化
+        map_scans = None
+        proprio_list = []
 
-        # Proprioception (B, d_obs)
-        proprio_list = [obs[obs_name] for obs_name in self.obs_groups["proprioception"]]
-        proprioception = torch.cat(proprio_list, dim=-1)
+        # 根据组名提取数据 (区分 Actor/Critic 的输入)
+        for name in self.obs_groups[group_key]:
+            if len(obs[name].shape) == 2:
+                proprio_list.append(obs[name])
+            else:
+                map_scans = obs[name]
 
-        # 2. Generate Keys/Values (Spatial Encoding)
-        # Output: (B, L*W, D)
-        keys_values = self.spatial_encoder(map_scans)
+        proprioception_raw = torch.cat(proprio_list, dim=-1)  # (B, d_obs)
 
-        # 3. Generate Query (Proprioception Projection)
-        query_flat = self.q_projection(proprioception)  # (B, D)
-        # Reshape to (B, N, D) where N=1
-        query = query_flat.view(B, self.query_seq_len, self.embed_dim)
+        # 应用标准化 (关键步骤)
+        proprioception = normalizer(proprioception_raw)
 
-        # 4. Cross-Attention
-        # Output: (B, N, D), Weights: (B, H, N, L*W)
-        # Note: We do not add LayerNorm or Residual connections here to strictly follow Fig 8B.
-        attn_output, self.attn_weights = self.attention(query, keys_values)
+        # 2. K/V 路径 (CNN Encoding)
+        # 2a. 提取高度 (Z-coordinate, index 2). (B, 1, L, W)
+        height_map = map_scans[:, 2:3, :, :]
+        # 2b. CNN 处理. (B, D-3, L, W)
+        cnn_features = encoder['cnn'](height_map)
+        # 2c. 拼接 CNN 特征和原始 XYZ 坐标. (B, D, L, W)
+        combined_features = torch.cat((cnn_features, map_scans), dim=1)
+        # 2d. 重塑为序列 (B, L*W, D)
+        keys_values = combined_features.permute(0, 2, 3, 1).reshape(B, -1, self.embed_dim)
 
-        # 5. Final Concatenation (Fig 8B: Concat)
-        # Flatten attention output: (B, D)
-        attn_output_flat = attn_output.view(B, -1)
-        # Concatenate with original proprioception (B, D + d_obs)
-        features = torch.cat((attn_output_flat, proprioception), dim=-1)
+        # 3. Q 路径 (Linear Projection) - 使用标准化后的本体感知
+        query_flat = encoder['q_proj'](proprioception)  # (B, D)
+        query = query_flat.view(B, 1, self.embed_dim)  # N=1
+
+        # 4. 交叉注意力模块 (MHA)
+        attn_output, attn_weights = encoder['attention'](query, keys_values)
+
+        # 存储权重（可选）
+        if group_key == "policy":
+            self.attn_weights_actor = attn_weights
+        else:
+            self.attn_weights_critic = attn_weights
+
+        # 5. 最终拼接 (Fig 8B: Top Concat) - 使用标准化后的本体感知
+        map_encoding = attn_output.view(B, -1)
+        features = torch.cat((map_encoding, proprioception), dim=-1)
 
         return features
 
-    # --- Standard ActorCritic Properties/Methods (Required by PPO) ---
-    @property
-    def action_mean(self) -> torch.Tensor:
-        return self.distribution.mean
+    # --- RSL RL Interface Methods ---
 
-    @property
-    def action_std(self) -> torch.Tensor:
-        return self.distribution.stddev
-
-    @property
-    def entropy(self) -> torch.Tensor:
-        return self.distribution.entropy().sum(dim=-1)
-
+    # 覆盖基类的 _update_distribution，实现完整的噪声处理逻辑 (复制自 ActorCritic.py)
     def _update_distribution(self, features: torch.Tensor) -> None:
-        mean = self.actor(features)
-        std = self.std.expand_as(mean)
+        if self.state_dependent_std:
+            # Compute mean and standard deviation
+            mean_and_std = self.actor(features)
+            if self.noise_std_type == "scalar":
+                mean, std = torch.unbind(mean_and_std, dim=-2)
+            elif self.noise_std_type == "log":
+                mean, log_std = torch.unbind(mean_and_std, dim=-2)
+                std = torch.exp(log_std)
+            else:
+                raise ValueError(f"Unknown standard deviation type: {self.noise_std_type}. Should be 'scalar' or 'log'")
+        else:
+            # Compute mean
+            mean = self.actor(features)
+            # Compute standard deviation
+            if self.noise_std_type == "scalar":
+                std = self.std.expand_as(mean)
+            elif self.noise_std_type == "log":
+                std = torch.exp(self.log_std).expand_as(mean)
+            else:
+                raise ValueError(f"Unknown standard deviation type: {self.noise_std_type}. Should be 'scalar' or 'log'")
+        # Create distribution
         self.distribution = Normal(mean, std)
 
-    # --- RSL RL Interface Methods ---
     def act(self, obs: TensorDict, **kwargs: dict[str, Any]) -> torch.Tensor:
-        features = self._get_features(obs)
-        # Note: Normalizer is Identity here, included for compatibility
-        features = self.actor_obs_normalizer(features)
+        # 获取 Actor 特征 (使用 Actor 的编码器、标准化器和观测组 "policy")
+        features = self._get_features(obs, self.actor_encoder, self.actor_obs_normalizer, "policy")
         self._update_distribution(features)
         return self.distribution.sample()
 
     def act_inference(self, obs: TensorDict) -> torch.Tensor:
-        features = self._get_features(obs)
-        features = self.actor_obs_normalizer(features)
-        return self.actor(features)
+        features = self._get_features(obs, self.actor_encoder, self.actor_obs_normalizer, "policy")
+        if self.state_dependent_std:
+            return self.actor(features)[..., 0, :]
+        else:
+            return self.actor(features)
 
     def evaluate(self, obs: TensorDict, **kwargs: dict[str, Any]) -> torch.Tensor:
-        # Actor and Critic share the encoder structure
-        features = self._get_features(obs)
-        features = self.critic_obs_normalizer(features)
+        # 获取 Critic 特征 (使用 Critic 的编码器、标准化器和观测组 "critic")
+        features = self._get_features(obs, self.critic_encoder, self.critic_obs_normalizer, "critic")
         return self.critic(features)
 
-    def get_actions_log_prob(self, actions: torch.Tensor) -> torch.Tensor:
-        return self.distribution.log_prob(actions).sum(dim=-1)
-
-    # --- Compatibility Methods (Mimicking ActorCritic.py interface) ---
-    def reset(self, dones: torch.Tensor | None = None) -> None:
-        # Clear stored attention weights on reset
-        self.attn_weights = None
-
-    def forward(self) -> NoReturn:
-        raise NotImplementedError
-
+    # 覆盖 update_normalization 以处理本体感知输入
     def update_normalization(self, obs: TensorDict) -> None:
-        # If normalization were implemented, it would be updated here.
-        pass
+        # 更新 Actor 标准化器
+        if self.actor_obs_normalization:
+            # 提取 Actor 的原始本体感知数据 (仅 1D 数据)
+            proprio_list = [obs[name] for name in self.obs_groups["policy"] if len(obs[name].shape) == 2]
+            if proprio_list:
+                actor_proprio = torch.cat(proprio_list, dim=-1)
+                self.actor_obs_normalizer.update(actor_proprio)
 
-    def load_state_dict(self, state_dict: dict, strict: bool = True) -> bool:
-        super().load_state_dict(state_dict, strict=strict)
-        return True
+        # 更新 Critic 标准化器
+        if self.critic_obs_normalization:
+            # 提取 Critic 的原始本体感知数据 (仅 1D 数据)
+            proprio_list = [obs[name] for name in self.obs_groups["critic"] if len(obs[name].shape) == 2]
+            if proprio_list:
+                critic_proprio = torch.cat(proprio_list, dim=-1)
+                self.critic_obs_normalizer.update(critic_proprio)
+
+    # (其他方法如 get_actions_log_prob, action_mean, entropy 等由基类 ActorCritic 提供)
+
+    def reset(self, dones: torch.Tensor | None = None) -> None:
+        self.attn_weights_actor = None
+        self.attn_weights_critic = None
