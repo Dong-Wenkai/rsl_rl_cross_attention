@@ -6,6 +6,7 @@
 """Definitions for neural-network components for RL-agents."""
 
 from .actor_critic import ActorCritic
+from .actor_critic_cross_mha import ActorCriticCrossMHA
 from .actor_critic_cnn import ActorCriticCNN
 from .actor_critic_recurrent import ActorCriticRecurrent
 from .rnd import RandomNetworkDistillation, resolve_rnd_config
@@ -15,6 +16,7 @@ from .symmetry import resolve_symmetry_config
 
 __all__ = [
     "ActorCritic",
+    "ActorCriticCrossMHA",
     "ActorCriticCNN",
     "ActorCriticRecurrent",
     "RandomNetworkDistillation",
