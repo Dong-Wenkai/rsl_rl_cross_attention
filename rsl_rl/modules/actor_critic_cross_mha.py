@@ -249,9 +249,9 @@ class ActorCriticCrossMHA(ActorCritic):
             # (B, 1, 64)
             linear = self.actor_linear(mlp_obs.unsqueeze(1))
             # (B, 1, 64)
-            map_encoding = self.actor_cross(linear, map_future, map_future, average_attn_weights=False,)
-            # (B, 1, dobs+64)
-            mlp_obs = torch.cat([mlp_obs, map_encoding], dim=-1)
+            map_encoding, _ = self.actor_cross(linear, map_future, map_future, average_attn_weights=False, )
+            # (B, dobs+64)
+            mlp_obs = torch.cat([mlp_obs, map_encoding.squeeze(1)], dim=-1)
 
         super()._update_distribution(mlp_obs)
 
@@ -272,8 +272,8 @@ class ActorCriticCrossMHA(ActorCritic):
             cnn_obs_orig = cnn_obs["policy_map"].flatten(start_dim=2)
             map_future = torch.cat((cnn_enc, cnn_obs_orig), dim=1).permute(0,2,1)
             linear = self.actor_linear(mlp_obs.unsqueeze(1))
-            map_encoding = self.actor_cross(linear, map_future, map_future, average_attn_weights=False, )
-            mlp_obs = torch.cat([mlp_obs, map_encoding], dim=-1)
+            map_encoding, _ = self.actor_cross(linear, map_future, map_future, average_attn_weights=False, )
+            mlp_obs = torch.cat([mlp_obs, map_encoding.squeeze(1)], dim=-1)
 
         if self.state_dependent_std:
             return self.actor(mlp_obs)[..., 0, :]
@@ -297,9 +297,9 @@ class ActorCriticCrossMHA(ActorCritic):
             # (B, 1, 64)
             linear = self.actor_linear(mlp_obs.unsqueeze(1))
             # (B, 1, 64)
-            map_encoding = self.critic_cross(linear, map_future, map_future, average_attn_weights=False, )
-            # (B, 1, dobs+64)
-            mlp_obs = torch.cat([mlp_obs, map_encoding], dim=-1)
+            map_encoding, _ = self.critic_cross(linear, map_future, map_future, average_attn_weights=False, )
+            # (B, dobs+64)
+            mlp_obs = torch.cat([mlp_obs, map_encoding.squeeze(1)], dim=-1)
 
         return self.critic(mlp_obs)
 
