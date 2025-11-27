@@ -173,7 +173,7 @@ class ActorCriticCrossMHA(ActorCritic):
                 #     encoding_dim += int(self.critic_cnns[obs_group].output_channels)  # type: ignore
                 # else:
                 #     raise ValueError("The output of the critic CNN must be flattened before passing it to the MLP.")
-                encoding_dim += int(self.actor_cnns[obs_group].output_channels) + 3
+                encoding_dim += int(self.critic_cnns[obs_group].output_channels) + 3
         else:
             self.critic_cnns = None
             encoding_dim = 0
@@ -244,8 +244,8 @@ class ActorCriticCrossMHA(ActorCritic):
             cnn_enc = torch.cat(cnn_enc_list, dim=-1).flatten(start_dim=2)
             # (B, 3, LxW)
             cnn_obs_orig = cnn_obs["policy_map"].flatten(start_dim=2)
-            # (B, 64, LxW)
-            map_future = torch.cat((cnn_enc, cnn_obs_orig), dim=1)
+            # (B, LxW, 64)
+            map_future = torch.cat((cnn_enc, cnn_obs_orig), dim=1).permute(0,2,1)
             # (B, 1, 64)
             linear = self.actor_linear(mlp_obs.unsqueeze(1))
             # (B, 1, 64)
@@ -270,7 +270,7 @@ class ActorCriticCrossMHA(ActorCritic):
             cnn_enc_list = [self.actor_cnns[obs_group](cnn_obs[obs_group][:, 2:3, :, :]) for obs_group in self.actor_obs_groups_2d]
             cnn_enc = torch.cat(cnn_enc_list, dim=-1).flatten(start_dim=2)
             cnn_obs_orig = cnn_obs["policy_map"].flatten(start_dim=2)
-            map_future = torch.cat((cnn_enc, cnn_obs_orig), dim=1)
+            map_future = torch.cat((cnn_enc, cnn_obs_orig), dim=1).permute(0,2,1)
             linear = self.actor_linear(mlp_obs.unsqueeze(1))
             map_encoding = self.actor_cross(linear, map_future, map_future, average_attn_weights=False, )
             mlp_obs = torch.cat([mlp_obs, map_encoding], dim=-1)
@@ -292,8 +292,8 @@ class ActorCriticCrossMHA(ActorCritic):
             cnn_enc = torch.cat(cnn_enc_list, dim=-1).flatten(start_dim=2)
             # (B, 3, LxW)
             cnn_obs_orig = cnn_obs["critic_map"].flatten(start_dim=2)
-            # (B, 64, LxW)
-            map_future = torch.cat((cnn_enc, cnn_obs_orig), dim=1)
+            # (B, LxW, 64)
+            map_future = torch.cat((cnn_enc, cnn_obs_orig), dim=1).permute(0,2,1)
             # (B, 1, 64)
             linear = self.actor_linear(mlp_obs.unsqueeze(1))
             # (B, 1, 64)
